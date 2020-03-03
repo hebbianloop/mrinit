@@ -80,6 +80,7 @@ export -f initialize_dataset
 ############################################################################################################################################
 # --------------------------------------------> 															    Initialize | Publish DataSet
 ############################################################################################################################################
+# todo allow dataset to publish to link with doi (add to JSON)
 function initialize_dataset_publish(){
 	datalad publish -d $(pwd) -r --to github data	
 }
@@ -148,6 +149,27 @@ export -f initialize_dataset_tree
 ############################################################################################################################################
 # --------------------------------------------> 																    Initialize | BIDS format
 ############################################################################################################################################
+# todo add configuration files for bids format
+#	   fields:
+#			   - subject
+#					-- demographic data
+#					-- session
+#						-- mri
+#				  			* anat
+#								- array of runs
+#								- for each run:
+# 									-- x,y,z,t dimensions, all params 
+#									-- best run
+#									-- qc metrics (mriqc/manual qc)
+#							* func
+#							* dwi
+#							* fmap?
+#						-- behavior 
+#						-- physio
+#
+# todo list of files / patterns to check for dataset
+# todo doi
+# todo link
 function initialize_dataset_bids(){
 	indir=${1} && shift # source data directory 
 	outdir=${1} && shift # output BIDS directory
@@ -294,9 +316,10 @@ function initialize_dataset_source_mri_tree_write(){
 	local subject_config="${dir}"/sub-"${SUBJECT}"/sub-"${SUBJECT}"_config.json
 	if [ ! -d "${dir}"/sub-"${SUBJECT}" ]; then
 		mkdir "${dir}"/sub-"${SUBJECT}" 2> /dev/null
-		jq -n '{Subject: {name: "'${SUBJECT}'", sex:"'${SUBJECT_SEX}'", Sessions:[]}}' > "${subject_config}"
-		jq '.Subjects += [{"'${SUBJECT}'":{}}]' "${dataset_config}" > "${tmpfile}"
-		jq '.' "${tmpfile}" > "${dataset_config}"
+		jq -n '{"'${SUBJECT}'": {sex:"'${SUBJECT_SEX}'", Sessions:[]}}' > "${subject_config}"
+		# todo check you don't need this
+		# jq '.Subjects += [{"'${SUBJECT}'":{}}]' "${dataset_config}" > "${tmpfile}"
+		# jq '.' "${tmpfile}" > "${dataset_config}"
 	fi
 	## update tree with series x modality
 	if [ ! -d "${dir}"/sub-"${SUBJECT}"/ses-"${SESSION}"/${modality} ]; then
@@ -390,7 +413,6 @@ function initialize_dataset_source_mri_tree_session(){
 				bidsjson="sub-"${SUBJECT}"_ses-"${SESSION}"_"${SERIES}"-$(printf '%03g' "${SERIES_ORDER}")"
 				[ ! -f ${bidsjson} ] && dcm2niix  -b o -o "${serdir}" -f ${bidsjson} ${file}				
 				# fold series into session
-				jq -s '.[0]."'${session_number}'"[].Acquisitions[] += .[1]' "${session_config}" "${series_config}"
 				jq -s '.[0]."'${session_number}'"[].Acquisitions[] += .[1] | .[0]' "${session_config}" "${series_config}" > "${tmpfile}"
 				jq '.' "${tmpfile}" > "${session_config}"
 			else
@@ -405,6 +427,10 @@ function initialize_dataset_source_mri_tree_session(){
 		jq '.' "${tmpfile}" > "${subject_config}"
 		jq -s '.[0].Subject.Sessions[] += .[1] | .[0]' "${subject_config}" "${session_config}" > "${tmpfile}"
 		jq '.' "${tmpfile}" > "${subject_config}"
+		########################################################################################################
+		# fold subject into dataset configuration
+		jq '.[0].Subjects[] += .[1] | .[0]' "${dataset_config}" "${subject_config}" > "${tmpfile}"
+		jq '.' "${tmpfile}" > "${dataset_config}"
 	done
 	########################################################################################################
 	return 0
