@@ -11,10 +11,12 @@ function parseOpts(){
 	    case ${1} in
 	    -d|--dir)
 			DATASET_DIR=${2}
+			export DATASET_DIR
 			shift
 			;;	    	
 	    -s|--data-source)
 			DATASET_SOURCE_DICOM_DIR=${2}
+			export DATASET_SOURCE_DICOM_DIR
 			shift
 			;;
 		--help|-help|-h|help)
@@ -53,6 +55,7 @@ function initialize_defaults(){
 	export LOGOUT=${LOG}.out && export LOGERR=${LOG}.err
 	export BIDS_DICOM_KEYS="AcquisitionMatrix AcquisitionMatrixPE AcquisitionNumber AcquisitionTime AnatomicalLandmarkCoordinates BaseResolution CoilCombinationMethod CoilString ConversionSoftware ConversionSoftwareVersion DeviceSerialNumber DwellTime EchoTime EffectiveEchoSpacing FlipAngle GradientSetType ImageOrientationPatientDICOM ImageType ImagingFrequency InPlanePhaseEncodingDirectionDICOM InstanceCreationTime InstitutionAddress InstitutionName InstitutionalDepartmentName InversionTime MagneticFieldStrength Manufacturer ManufacturersModelName MatrixCoilMode Modality MRAcquisitionType MRTransmitCoilSequence MultibandAccelerationFactor NegativeContrast NonlinearGradientCorrection NumberofAverages NumberofPhaseEncodingSteps NumberShots ParallelAcquisitionTechnique ParallelReductionFactorInPlane PartialFourier PartialFourierDirection PatientBirthDate PatientID PatientName PatientPosition PatientSex PatientWeight PercentPhaseFieldOfView PerformedProcedureStepStartTime PhaseEncodingDirection PhaseEncodingSteps PhaseOversampling PhaseResolution PixelBandwidth PixelSpacing ProcedureStepDescription ProtocolName PulseSequenceDetails PulseSequenceType ReceiveCoilActiveElements ReceiveCoilName ReconMatrixPE RepetitionTime SAR ScanOptions ScanningSequence SequenceName SequenceVariant SeriesDescription SeriesNumber ShimSetting SliceEncodingDirection SliceThickness SliceTiming SoftwareVersions StationName StudyDescription TotalReadoutTime TxRefAmp"
 	export OVERWRITE=''
+	export SOURCE_CONFIG="${DATASET_DIR}"/data/source/mri/dataset_config.json
 }
 export -f initialize_defaults
 ############################################################################################################################################
@@ -174,8 +177,8 @@ function initialize_dataset_bids(){
 	indir=${1} && shift # source data directory 
 	outdir=${1} && shift # output BIDS directory
 	# loop through series and obtain BIDS-required json
-	parallel -o "${dir}"/sub-"${SUBJECT}"/ses-"${SESSION}"/${modality}/
-	dcm2niix  -b o -f ses-"${SESSION}"/${modality}/sub-"${SUBJECT}"_ses-"${SESSION}"_"${SERIES}"-$(printf '%03g' "${SERIES_ORDER}") ${file}
+	#parallel -o "${dir}"/sub-"${SUBJECT}"/ses-"${SESSION}"/${modality}/
+	#dcm2niix  -b o -f ses-"${SESSION}"/${modality}/sub-"${SUBJECT}"_ses-"${SESSION}"_"${SERIES}"-$(printf '%03g' "${SERIES_ORDER}") ${file}
 }
 ############################################################################################################################################
 # --------------------------------------------> 															    Initialize | Source MRI Data
@@ -199,9 +202,9 @@ function initialize_dataset_source_mri(){
 		mkdir -pv "${outdir}"
 	fi
 	# add configuration file
-	if [ "${overwrite}" ] || [ ! -f "${dataset_config}" ]; then
-		jq -n '{Name: "'"${dataset_name}"'", Description: "'"${dataset_description}"'", Path:"'"${outdir}"'", Subjects: []}' > "${dataset_config}"
-	fi
+	# if [ "${overwrite}" ] || [ ! -f "${dataset_config}" ]; then 
+	jq -n '{Name: "'"${dataset_name}"'", Description: "'"${dataset_description}"'", Path:"'"${outdir}"'", Subjects: []}' > "${dataset_config}"
+	# fi
 	echo 'Indexing Input Directory Tree'
 	############################################################################################
 	# read individual files and create output tree (directories)
@@ -220,7 +223,7 @@ function initialize_dataset_source_mri(){
 	# TODO enumerate sessions by date
 	#
 	## get list of subjects
-	(parallel -k --link initialize_dataset_source_mri_metadata_subject {} ::: $(find "${outdir}" -name 'sub-*' -type d -d 1))
+	parallel -k --link initialize_dataset_source_mri_metadata_subject {} "${dataset_config}" ::: $(find "${outdir}" -name 'sub-*' -type d -d 1)
 	## iterate over subjects and sort/rename sessions
 	##
 	return 0
@@ -317,9 +320,6 @@ function initialize_dataset_source_mri_tree_write(){
 	if [ ! -d "${dir}"/sub-"${SUBJECT}" ]; then
 		mkdir "${dir}"/sub-"${SUBJECT}" 2> /dev/null
 		jq -n '{"'${SUBJECT}'": {sex:"'${SUBJECT_SEX}'", Sessions:[]}}' > "${subject_config}"
-		# todo check you don't need this
-		# jq '.Subjects += [{"'${SUBJECT}'":{}}]' "${dataset_config}" > "${tmpfile}"
-		# jq '.' "${tmpfile}" > "${dataset_config}"
 	fi
 	## update tree with series x modality
 	if [ ! -d "${dir}"/sub-"${SUBJECT}"/ses-"${SESSION}"/${modality} ]; then
@@ -368,6 +368,7 @@ export -f initialize_dataset_source_mri_tree
 ############################################################################################################################################
 function initialize_dataset_source_mri_tree_session(){
 	local dir="${1}" && shift
+	local dataset_config="${1}" && shift
 	# define tmp file
 	local tmpfile=/tmp/tmp.$$.file	
 	# get subject
@@ -399,22 +400,30 @@ function initialize_dataset_source_mri_tree_session(){
 			# DICOM - read metadata from header
 			########################################################################################################
 			if initialize_dataset_source_mri_tree_dicom "${file}"; then
+				printf '\033[K\r converting %s' ${file}
 				# write session metadata to file
 				session_config="${session_dir}"/"${subject}"_"${session_number}"_config.json
 				[ ! -f "${session_config}" ] && jq -n '{"'${session_number}'": [{date:"'${DATE}'", time:"'${TIME}'", age:"'${SUBJECT_AGE}'", kilograms:"'$(printf '%.2f' ${SUBJECT_WEIGHT})'", Acquisitions:[{}]}]}' > "${session_config}"						
+				# bids parameters
+				bidsjson="sub-"${SUBJECT}"_${session_number}_"${SERIES}"-$(printf '%03g' "${SERIES_ORDER}")"				
 				# rename file
 				serdir="$(dirname ${file})"
 				newfile=$(echo "${file}" | sed 's|/| |g' | awk '{print $NF}' | sed "s|${session_timestamp}|${session_number}|g")
 				[ ! -f "${serdir}"/"${newfile}" ] && mv "${file}" "${serdir}"/"${newfile}"
 				# write series metadata to file
 				series_config=${serdir}/"${subject}"_"${session_number}"_"${SERIES}"-$(printf '%03g' "${SERIES_ORDER}")_config.json	
-				[ ! -f "${series_config}" ] && jq -n '{Acquisition: {name: "'${SERIES}'",order:'${SERIES_ORDER}', time:"'${SERIES_TIME}'", sequence:"'${SEQUENCE}'", modality:"'${modality}'", "parameters":{}}}' > "${series_config}"
-				# create bids json
-				bidsjson="sub-"${SUBJECT}"_ses-"${SESSION}"_"${SERIES}"-$(printf '%03g' "${SERIES_ORDER}")"
-				[ ! -f ${bidsjson} ] && dcm2niix  -b o -o "${serdir}" -f ${bidsjson} ${file}				
-				# fold series into session
-				jq -s '.[0]."'${session_number}'"[].Acquisitions[] += .[1] | .[0]' "${session_config}" "${series_config}" > "${tmpfile}"
-				jq '.' "${tmpfile}" > "${session_config}"
+				if [ ! -f "${series_config}" ]; then 
+					jq -n '{Acquisition: {name: "'${SERIES}'",order:'${SERIES_ORDER}', time:"'${SERIES_TIME}'", sequence:"'${SEQUENCE}'", modality:"'${modality}'", "parameters":{}}}' > "${series_config}"
+					# fold parameters into acquisition configuration
+					if [ ! -f "${bidsjson}.json" ]; then 
+						dcm2niix  -b o -o "${serdir}" -f ${bidsjson} ${serdir}
+						jq -s '.[0].Acquisition.parameters += .[1] | .[0]' "${series_config}" "${serdir}/${bidsjson}.json" > "${tmpfile}"
+						jq '.' "${tmpfile}" > "${series_config}"
+					fi					
+					# fold series into session
+					jq -s '.[0]."'${session_number}'"[].Acquisitions[] += .[1] | .[0]' "${session_config}" "${series_config}" > "${tmpfile}"
+					jq '.' "${tmpfile}" > "${session_config}"
+				fi
 			else
 				# skip if not dicom
 				continue
@@ -422,14 +431,22 @@ function initialize_dataset_source_mri_tree_session(){
 			# INSERT OTHER FILE FORMAT HERE
 		done
 		########################################################################################################
-		# fold session into subject		
-		jq '.Subject.Sessions += [{"'${session_number}'":[]}]' "${subject_config}" > "${tmpfile}"
-		jq '.' "${tmpfile}" > "${subject_config}"
-		jq -s '.[0].Subject.Sessions[] += .[1] | .[0]' "${subject_config}" "${session_config}" > "${tmpfile}"
-		jq '.' "${tmpfile}" > "${subject_config}"
+		# fold session into subject	
+		local sessions=$(jq '.'$(echo ${subject} | sed 's|sub-||g')'.Sessions[]."'${session_number}'"' "${subject_config}")
+		if [ ! "${sessions}" ]; then
+			jq '.'$(echo ${subject} | sed 's|sub-||g')'.Sessions += [{"'${session_number}'":[]}]' "${subject_config}" > "${tmpfile}"
+			jq '.' "${tmpfile}" > "${subject_config}"
+		fi
+		jq -s '.[0]."'$(echo ${subject} | sed 's|sub-||g')'".Sessions[]."'${session_number}'" = .[1]."'${session_number}'" | .[0]' "${subject_config}" "${session_config}" > "${tmpfile}"
+		jq '.' "${tmpfile}" > "${subject_config}"			
 		########################################################################################################
 		# fold subject into dataset configuration
-		jq '.[0].Subjects[] += .[1] | .[0]' "${dataset_config}" "${subject_config}" > "${tmpfile}"
+		local subjects=$(jq '.Subjects[]."'$(echo ${subject} | sed 's|sub-||g')'"' ${dataset_config})
+		if [ ! "${subjects}" ]; then
+			jq '.Subjects += [{"'$(echo ${subject} | sed 's|sub-||g')'":[]}]' "${dataset_config}" > "${tmpfile}"
+			jq '.' "${tmpfile}" > "${dataset_config}"
+		fi
+		jq -s '.[0].Subjects[]."'$(echo ${subject} | sed 's|sub-||g')'" = .[1]."'$(echo ${subject} | sed 's|sub-||g')'" | .[0]' "${dataset_config}" "${subject_config}" > "${tmpfile}"
 		jq '.' "${tmpfile}" > "${dataset_config}"
 	done
 	########################################################################################################
@@ -441,43 +458,43 @@ export -f initialize_dataset_source_mri_tree_session
 ############################################################################################################################################
 function initialize_dataset_source_mri_metadata_subject (){
 	local dir=${1} && shift
-	printf '\033[K\r reading  %s ' "${dir}"
-	initialize_dataset_source_mri_tree_session "${dir}"
+	local config=${1} && shift
+	initialize_dataset_source_mri_tree_session "${dir}" "${config}"
 	# done
 	return 0
 }
 export -f initialize_dataset_source_mri_metadata_subject
 ############################################################################################################################################
-# --------------------------------------------> 													   		 Initialize | Gather MR Metadata
-############################################################################################################################################
-# PRIORITY low
-# TODO traverse directory tree using keys and nest configuration files from root to leaf 
-# TODO use dcm2niix output JSON files
-function initialize_dataset_source_mri_metadata(){
-	local file=${1} && shift
-	local dir=${1} && shift
-	local overwrite=${1} && shift
-	############################################################################################
-	# initialize configuration file
-	############################################################################################
-	local config=${dir}/dataset_config.json
-	local dir_size="$(du -d 1 -c -h ${dir} | grep 'total' | awk '{print $1}')"
-	## get keys from configuration JSON
-	## --> hierarchically traverse tree using keys from dataset -> subject -> session -> modality -> series
-	## --> collapse nested objects into parent at each level
-}
-export -f initialize_dataset_source_mri_metadata
-############################################################################################################################################
 # --------------------------------------------> 													     								Main
 ############################################################################################################################################
-
-parseOpts "${@}"
-initialize_defaults
-if [ ! -d "${DATASET_DIR}" ]; then
-	initialize_dataset
-fi
-initialize_dataset_source_mri "${DATASET_SOURCE_DICOM_DIR}" "${DATASET_DIR}"/data/source/mri "${OVERWRITE}"
-
+# TODO global variables are not available in this call??
+function init(){
+	parseOpts "${@}"
+	initialize_defaults
+	if [ ! -d "${DATASET_DIR}" ]; then
+		initialize_dataset
+	fi
+	if [ "${DATASET_SOURCE_DICOM_DIR}" ]; then
+		# convert from source tree into bids-ified tree
+		initialize_dataset_source_mri "${DATASET_SOURCE_DICOM_DIR}" "${DATASET_DIR}"/data/source/mri "${OVERWRITE}"	
+	fi
+	## todo check for BIDS CONFIG
+	if [ ! -f "${BIDS_CONFIG}" ]; then
+		echo ''
+		echo 'read subjects from BIDS configration'
+		# convert from source tree into bids-ified tree
+		#initialize_dataset_bids "${DATASET_SOURCE_DICOM_DIR}" "${DATASET_DIR}"/data/bids "${OVERWRITE}"	
+	else
+		echo 'read subjects from BIDS configration'
+	fi	
+	#  todo convert each subject to bids in parallel
+	#  todo update bids dir when new source subject is present
+	return 0
+}
+export -f init 
+##
+init "${@}"
+##
 ############################################################################################################################################
 # --------------------------------------------> 													      Initialize | Gather DICOM Metadata
 ############################################################################################################################################
