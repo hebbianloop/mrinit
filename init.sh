@@ -1,7 +1,7 @@
 #!/bin/bash
 
 ## TODO function to check for dependencies 
-
+## TODO allow individual functionality for DICOM Parsing, Import, BIDS Conversion
 
 ############################################################################################################################################
 # --------------------------------------------> 																			   Parse Options
@@ -13,7 +13,16 @@ function parseOpts(){
 			DATASET_DIR=${2}
 			export DATASET_DIR
 			shift
-			;;	    	
+			;;
+	    --init-meta)
+			INITMETADATA='init'
+			export DATASET_DIR
+			;;
+	    --subject)
+			SUBJECT=${2}
+			export SUBJECT
+			shift
+			;;							
 	    -s|--data-source)
 			DATASET_SOURCE_DICOM_DIR=${2}
 			export DATASET_SOURCE_DICOM_DIR
@@ -72,8 +81,9 @@ function initialize_dataset(){
 		echo -e "${GREEN} Dataset Initialized with Template (${TEMPLATE_URL})${NC}"
 	else
 		echo -e "${YELLOW} Cannot Contact Remote (${TEMPLATE_URL}) ${BLUE}- initializing locally${NC}"
-		datalad create -D "Dataset Template" "${dataset_dir}"
-		initialize_dataset_tree "-d ${dataset_dir}"
+		#datalad create -D "Dataset Template" "${dataset_dir}"
+		#initialize_dataset_tree "-d ${dataset_dir}"
+		return 1
 	fi
 	############################################################################################
 	# done!
@@ -176,6 +186,17 @@ export -f initialize_dataset_tree
 function initialize_dataset_bids(){
 	indir=${1} && shift # source data directory 
 	outdir=${1} && shift # output BIDS directory
+	
+	# dataset description
+	if [ ! -f "${outdir}"/dataset_description.json ]; then
+		jq -n '{Name: null, BIDSVersion: null, License: "CC0", Authors:[{}], Acknowledgements: null, HowtoAcknowledge: null, ReferencesAndLinks: [{}], DatasetDOI: null }' > "${outdir}"/dataset_description.json
+	fi
+	# participants tsv
+	# CHANGES
+	# README
+	#
+
+	
 	# loop through series and obtain BIDS-required json
 	#parallel -o "${dir}"/sub-"${SUBJECT}"/ses-"${SESSION}"/${modality}/
 	#dcm2niix  -b o -f ses-"${SESSION}"/${modality}/sub-"${SUBJECT}"_ses-"${SESSION}"_"${SERIES}"-$(printf '%03g' "${SERIES_ORDER}") ${file}
@@ -220,9 +241,9 @@ function initialize_dataset_source_mri(){
 	############################################################################################
 	# gather metadata by collapsing individual config files into dataset config
 	############################################################################################
-	# TODO enumerate sessions by date
 	#
 	## get list of subjects
+	printf '\r\nWriting Output Directory Tree'
 	parallel -k --link initialize_dataset_source_mri_metadata_subject {} "${dataset_config}" ::: $(find "${outdir}" -name 'sub-*' -type d -d 1)
 	## iterate over subjects and sort/rename sessions
 	##
@@ -276,9 +297,19 @@ function initialize_dataset_source_mri_tree_dicom(){
 	SESSION=$(echo ${DATE}.${TIME} | sed 's|[/|:]|_|g')
 	#
 	let SUBJECT_AGE=$((`date +%s -d $(echo ${DATE} | sed 's|/||g')` - `date +%s -d $(echo ${SUBJECT_DOB} | sed 's|/||g')`))/31540000
+	#
 	return 0
 }
 export -f initialize_dataset_source_mri_tree_dicom
+############################################################################################################################################
+# --------------------------------------------> 											   				   Initialize | Query NIFTI File
+############################################################################################################################################
+function initialize_dataset_source_mri_tree_nifti(){
+	local file="${1}" && shift
+	# search for associated JSON file
+	# exit / skip with error if no JSON
+	# read subject name, session, modality from input file (tsv?)
+}
 ############################################################################################################################################
 # --------------------------------------------> 											    		  Initialize | Read Source Data File
 ############################################################################################################################################
@@ -290,11 +321,13 @@ function initialize_dataset_source_mri_tree_read(){
 	fi
 	# check if file is dicom
 	if initialize_dataset_source_mri_tree_dicom "${file}"; then
-		let SUBJECT_AGE=$((`date +%s -d $(echo ${DATE} | sed 's|/||g')` - `date +%s -d $(echo ${SUBJECT_DOB} | sed 's|/||g')`))/31540000
 		FILE_EXT='dicom'
 		return 0
 	fi
 	# check if file is nifti
+	if initialize_dataset_source_mri_tree_nifti "${file}"; then
+		FILE_EXT='nii.gz'
+	fi
 	# read subject name from configuration file
 	# file is other
 	FILE_EXT='other'
@@ -364,9 +397,9 @@ function initialize_dataset_source_mri_tree(){
 }
 export -f initialize_dataset_source_mri_tree
 ############################################################################################################################################
-# --------------------------------------------> 											      Initialize | Sort DICOM files into Session
+# --------------------------------------------> 												    Initialize | Write MR Metadata | Subject
 ############################################################################################################################################
-function initialize_dataset_source_mri_tree_session(){
+function initialize_dataset_source_mri_metadata_subject (){
 	local dir="${1}" && shift
 	local dataset_config="${1}" && shift
 	# define tmp file
@@ -377,14 +410,19 @@ function initialize_dataset_source_mri_tree_session(){
 		echo 'missing '${dir}
 		return 1
 	else
+		# definite subject configuration
 		subject_config=${dir}/"${subject}"_config.json
 	fi
 	# retrieve sessions in subject direstory
 	SESSIONS=($(find "${dir}" -name 'ses-*' -type d -d 1 | sort -u))
-	counter=0
+	if [ -z ${SESSIONS[@]} ]; then
+		echo 'missing sessions for '${subject}
+		return 1
+	fi
 	########################################################################################################
 	# loop across sessions
 	########################################################################################################
+	counter=0 # start at session 0!
 	for session in ${SESSIONS[*]}; do
 		########################################################################################################
 		((counter++))
@@ -393,6 +431,9 @@ function initialize_dataset_source_mri_tree_session(){
 		session_dir="${dir}"/"${session_number}"	
 		# rename session folder
 		[ ! -d "${session_dir}" ] && mv "${session}" "${session_dir}"
+		# write session metadata to file
+		session_config="${session_dir}"/"${subject}"_"${session_number}"_config.json
+		[ ! -f "${session_config}" ] && jq -n '{"'${session_number}'": [{date:"'${DATE}'", time:"'${TIME}'", age:"'${SUBJECT_AGE}'", kilograms:"'$(printf '%.2f' ${SUBJECT_WEIGHT})'", Acquisitions:[{}]}]}' > "${session_config}"		
 		########################################################################################################
 		# get metadata from each file with sesssion time stamp
 		for file in $(find "${session_dir}" -name "*${session_timestamp}*" -type f) ; do
@@ -400,10 +441,7 @@ function initialize_dataset_source_mri_tree_session(){
 			# DICOM - read metadata from header
 			########################################################################################################
 			if initialize_dataset_source_mri_tree_dicom "${file}"; then
-				printf '\033[K\r converting %s' ${file}
-				# write session metadata to file
-				session_config="${session_dir}"/"${subject}"_"${session_number}"_config.json
-				[ ! -f "${session_config}" ] && jq -n '{"'${session_number}'": [{date:"'${DATE}'", time:"'${TIME}'", age:"'${SUBJECT_AGE}'", kilograms:"'$(printf '%.2f' ${SUBJECT_WEIGHT})'", Acquisitions:[{}]}]}' > "${session_config}"						
+				printf '\033[K\r %s/%s/%s %s' ${subject} ${session_number} ${modality} ${SERIES}
 				# bids parameters
 				bidsjson="sub-"${SUBJECT}"_${session_number}_"${SERIES}"-$(printf '%03g' "${SERIES_ORDER}")"				
 				# rename file
@@ -450,15 +488,7 @@ function initialize_dataset_source_mri_tree_session(){
 		jq '.' "${tmpfile}" > "${dataset_config}"
 	done
 	########################################################################################################
-	return 0
-}
-export -f initialize_dataset_source_mri_tree_session
-############################################################################################################################################
-# --------------------------------------------> 												   Initialize | Gather MR Metadata | Subject
-############################################################################################################################################
-function initialize_dataset_source_mri_metadata_subject (){
-	local dir=${1} && shift
-	local config=${1} && shift
+	return 0	
 	initialize_dataset_source_mri_tree_session "${dir}" "${config}"
 	# done
 	return 0
@@ -471,11 +501,17 @@ export -f initialize_dataset_source_mri_metadata_subject
 function init(){
 	parseOpts "${@}"
 	initialize_defaults
+	## 
+	if [ "${INITMETADATA}" ]; then
+		initialize_dataset_source_mri_metadata_subject "${DATASET_DIR}"/data/source/mri/${SUBJECT} "${DATASET_DIR}"/data/source/mri/dataset_config.json
+		return 0
+	fi	
 	if [ ! -d "${DATASET_DIR}" ]; then
-		initialize_dataset
+		initialize_dataset ${DATASET_DIR}
 	fi
 	if [ "${DATASET_SOURCE_DICOM_DIR}" ]; then
 		# convert from source tree into bids-ified tree
+		# TODO overwrite settings (delete before writing?)
 		initialize_dataset_source_mri "${DATASET_SOURCE_DICOM_DIR}" "${DATASET_DIR}"/data/source/mri "${OVERWRITE}"	
 	fi
 	## todo check for BIDS CONFIG
@@ -486,7 +522,7 @@ function init(){
 		#initialize_dataset_bids "${DATASET_SOURCE_DICOM_DIR}" "${DATASET_DIR}"/data/bids "${OVERWRITE}"	
 	else
 		echo 'read subjects from BIDS configration'
-	fi	
+	fi
 	#  todo convert each subject to bids in parallel
 	#  todo update bids dir when new source subject is present
 	return 0
@@ -495,61 +531,5 @@ export -f init
 ##
 init "${@}"
 ##
-############################################################################################################################################
-# --------------------------------------------> 													      Initialize | Gather DICOM Metadata
-############################################################################################################################################
-# DEPRECATED - good example for JQ parsing though
-# function deprecated_dicom_parsing(){
-# 	local file=${1} && shift
-# 	local dir=${1} && shift
-# 	# default
-# 	LOG="/tmp/main.runtime.$$"	
-# 	# parse dicom
-# 	if dcminfo -all "${file}" 2>"${LOG}" 1>"${LOG}"; then
-# 		isdicom='true'
-# 		isnifti='false'
-# 		# get information for formatting JSON
-# 		subject="$(cat ${LOG} | grep 'PatientName' | awk -F '\t| {2,}' '{print $NF}' | sed 's| ||g')"
-# 		dicom_series="$(cat ${LOG} | grep 'SeriesDescription' | awk -F '\t| {2,}' '{print $NF}' | sed 's| ||g')"
-# 		dicom_series_order="$(cat ${LOG} | grep 'SeriesNumber' | awk -F '\t| {2,}' '{print $NF}' | sed 's| ||g')"
-# 		dicom_series_time="$(cat ${LOG} | grep 'AcquisitionTime' | awk -F '\t| {2,}' '{print $NF}' | sed 's| ||g')"
-# 		dicom_date="$(cat ${LOG} | grep 'StudyDate' | awk -F '\t| {2,}' '{print $NF}' | sed 's| ||g')"
-# 		dicom_sequence="$(cat ${LOG} | grep 'SequenceName' | awk -F '\t| {2,}' '{print $NF}' | sed 's| ||g')"
-# 		############################################################################################
-# 		# Append Subject + Date	to Configuration
-# 		if [ "$(jq '.Subjects."'${subject}'".Dicom."'${dicom_date}'"' "${dir}"/config.json)" = 'null' ]; then
-# 			str="$(printf '"%s": {"Dicom": {"%s": []}}' ${subject} ${dicom_date})"
-# 			jq '.Subjects += {'"${str}"'}' "${dir}"/config.json > "${dir}"/tmp.$$.json
-# 			jq . "${dir}"/tmp.$$.json > "${dir}"/config.json
-# 		fi
-# 		############################################################################################
-# 		# Append Series to Date		
-# 		if [ "$(jq '.Subjects."'${subject}'".Dicom."'${dicom_date}'"['${dicom_series_order}']' "${dir}"/config.json)" = 'null' ]; then
-# 			str="$(printf '"%s":{"PulseSequenceName": "%s", 'AcquisitionStartTime': "%s", "Files": []}' ${dicom_series} ${dicom_sequence} ${dicom_series_time})"
-# 			jq '.Subjects."'${subject}'".Dicom."'${dicom_date}'"['$(( ${dicom_series_order} - 1 ))'] = {'"${str}"'}' "${dir}"/config.json > "${dir}"/tmp.$$.json
-# 			jq . "${dir}"/tmp.$$.json > "${dir}"/config.json			
-# 		fi
-# 		############################################################################################
-# 		# Append BIDS Spec to Series
-# 		for field in ${BIDS_DICOM_KEYS}; do
-# 			fieldval="\"$(cat ${LOG} | grep "${field}" | awk -F '\t| {2,}' '{print $NF}')\""
-# 			[ "${fieldval}" = "\"\"" ] && fieldval='null'
-# 			if [ "$(jq '.Subjects."'${subject}'".Dicom."'${dicom_date}'"['$(( ${dicom_series_order} - 1 ))']."'${dicom_series}'"."'${field}'"' "${dir}"/config.json)" = 'null' ]; then
-# 				jq '.Subjects."'${subject}'".Dicom."'${dicom_date}'"['$(( ${dicom_series_order} - 1 ))']."'${dicom_series}'" += {"'${field}'": '"${fieldval}"'}' "${dir}"/config.json > "${dir}"/tmp.$$.json
-# 				jq . "${dir}"/tmp.$$.json > "${dir}"/config.json			
-# 			fi			
-# 		done
-# 		############################################################################################
-# 		# Append Files to Series
-# 		if [ "$(jq '.Subjects."'${subject}'".Dicom."'${dicom_date}'"['$(( ${dicom_series_order} - 1 ))']."'${dicom_series}'".Files[-1]' "${dir}"/config.json)" != "${file}" ]; then
-# 			jq '.Subjects."'${subject}'".Dicom."'${dicom_date}'"['$(( ${dicom_series_order} - 1 ))']."'${dicom_series}'".Files += ["'${file}'"]' "${dir}"/config.json > "${dir}"/tmp.$$.json
-# 			jq . "${dir}"/tmp.$$.json > "${dir}"/config.json
-# 		fi
-# 	else
-# 		return 0
-# 	fi
-# 	# clean up buffer for json
-# 	rm ${dir}/tmp.$$.json
-# 	#
-# 	return 0
-# }
+##
+##
